@@ -50,12 +50,12 @@ The AI only suggests: nothing is saved until you press Save, and below 60% confi
 
 ```mermaid
 flowchart LR
-    B[Browser<br/>HTML · CSS · JS] -- HTTP --> P[PHP pages<br/>public/*.php]
-    P -- PDO --> D[(MySQL<br/>18 tables)]
-    P -- saves --> U[public/uploads/]
-    P -- cURL --> F[Flask ML service<br/>127.0.0.1:5000]
-    F -- HTTPS --> N[Pl@ntNet API]
-    P -- cURL --> O[Ollama LLM<br/>127.0.0.1:11434]
+    B["Browser<br/>HTML · CSS · JS"] -- HTTP --> P["PHP pages<br/>public/*.php"]
+    P -- PDO --> D[("MySQL<br/>18 tables")]
+    P -- saves --> U["public/uploads/"]
+    P -- cURL --> F["Flask ML service<br/>127.0.0.1:5000"]
+    F -- HTTPS --> N["Pl@ntNet API"]
+    P -- cURL --> O["Ollama LLM<br/>127.0.0.1:11434"]
 ```
 
 - Pages are rendered on the server; JavaScript only adds no-reload extras (live username check, Community filters, AI text loading). Everything still works without JavaScript.
