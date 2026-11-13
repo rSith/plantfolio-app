@@ -1,0 +1,272 @@
+/* Dashboard only (P03, wireframe p10, CORE-24 and CORE-25). Loaded by dashboard.php through $page_css. */
+/* Functional style: compact white panels with clear headings, so the page is scanned, not read. */
+
+/* ── Greeting ───────────────────────────────────────── */
+
+/* A sage banner, like the Public Profile's cover band: the greeting on the left, leaves growing in on the right.
+   overflow: hidden crops the leaves at the banner's edge, so they look as if they grow from outside it. */
+.dash-head {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: var(--space-24);
+  padding: var(--space-24);
+  border-radius: var(--radius-card);
+  background: var(--color-sage);
+}
+
+/* Above the leaves, so a long greeting on a phone stays readable */
+.dash-head-text {
+  position: relative;
+  z-index: 1;
+  max-width: 70%;
+}
+
+.dash-title {
+  margin-bottom: var(--space-8);
+}
+
+.dash-date {
+  margin: 0;
+  color: var(--color-forest);
+  font-size: var(--text-body-sm);
+}
+
+.dash-date .icon {
+  margin-right: var(--space-4);
+  color: var(--color-leaf);
+}
+
+.dash-head-art {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: auto;
+  max-width: none;   /* the base img rule would shrink it; the banner's overflow crops it instead */
+  height: 70%;       /* phone: small, so the leaves stay clear of the date */
+  pointer-events: none;
+}
+
+@media (min-width: 768px) {
+  .dash-head {
+    padding: var(--space-32) var(--space-48);
+  }
+
+  .dash-head-art {
+    height: 150%;   /* taller than the banner, so the top leaves run off its edge too */
+  }
+}
+
+/* ── Columns ────────────────────────────────────────── */
+/* Phone and tablet: one column, main sections first. Desktop: main column and a narrower side column. */
+
+.dash-grid {
+  display: grid;
+  gap: var(--space-16);
+  align-items: start;
+}
+
+.dash-main,
+.dash-side {
+  display: grid;
+  gap: var(--space-16);
+  min-width: 0;   /* a grid item refuses to shrink below its content without this */
+}
+
+/* The two boxes: the content, then the dashed add button at the bottom. Lists inside scroll instead of growing,
+   so a box keeps its size however many tasks or collections there are. */
+.dash-box {
+  display: flex;
+  flex-direction: column;
+}
+
+.dash-box-body {
+  flex: 1;   /* takes the spare height, which keeps the add button at the bottom of the box */
+  margin-bottom: var(--space-12);
+}
+
+.dash-box .dash-add-btn {
+  margin-top: 0;   /* .dash-box-body already leaves the space above it */
+}
+
+/* Today's care: three tasks, then scroll. A row is 72px on a desktop and up to about 100px on a phone (the badge
+   moves under the text), so the phone height is a little more than three of its usual rows. */
+.care-list {
+  max-height: 300px;
+}
+
+@media (min-width: 768px) {
+  .care-list {
+    max-height: calc(3 * 72px + 2px);   /* three rows and the two lines between them */
+  }
+}
+
+@media (min-width: 1024px) {
+  .dash-grid {
+    grid-template-columns: 2fr 1fr;
+    gap: var(--gutter);
+    align-items: stretch;   /* both columns as tall as the taller one, so the two boxes match */
+  }
+
+  /* A fixed size: Today's care always keeps room for three tasks (the most its list shows), so with fewer tasks, or
+     none for a new member, both boxes stay as tall as with a full list */
+  .dash-main .dash-box-body {
+    min-height: calc(3 * 72px + 2px);
+  }
+
+  .dash-main,
+  .dash-side {
+    gap: var(--gutter);
+  }
+}
+
+/* ── Garden at a glance ─────────────────────────────── */
+
+.glance-total {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  margin: 0 0 var(--space-12);
+  color: var(--color-muted);
+  font-size: var(--text-small);
+  line-height: 1.3;
+}
+
+.glance-total strong {
+  color: var(--color-forest);
+  font-family: var(--font-display);
+  font-size: var(--text-h1);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+}
+
+/* One line per collection: name, how many plants, and up to three small photos with "+4" for the rest */
+/* Room for three collections; with more, the list scrolls inside the box, so the box keeps its size.
+   Each line is 44px tall (.glance-collection), so the height is the top padding plus three lines. */
+.glance-collections {
+  max-height: calc(var(--space-8) + 3 * 44px);   /* scrolls with .scroll-quiet (components.css) */
+  margin: var(--space-16) 0 0;
+  padding: var(--space-8) 0 0;
+  border-top: 1px solid var(--color-line);
+  list-style: none;
+}
+
+.glance-collection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-12);
+  min-height: 44px;   /* touch target */
+  padding: var(--space-4) 0;
+  color: var(--color-ink);
+  font-size: var(--text-body-sm);
+  text-decoration: none;
+}
+
+.glance-collection:hover {
+  color: var(--color-forest);
+}
+
+.glance-collection:hover .glance-collection-name {
+  text-decoration: underline;
+}
+
+.glance-collection-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.glance-collection-name .icon {
+  color: var(--color-muted);
+}
+
+/* The photos overlap a little, like the avatar stack on the Landing page */
+.glance-photos {
+  display: flex;
+  align-items: center;
+}
+
+.glance-photos img,
+.glance-more {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--color-white);
+  border-radius: 50%;
+  background: var(--color-sage);
+  object-fit: cover;
+}
+
+.glance-photos > * + * {
+  margin-left: -8px;
+}
+
+.glance-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-cream);
+  color: var(--color-muted);
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+}
+
+/* ── All reminders popup ────────────────────────────── */
+
+/* One heading per day; today in terracotta and overdue in red, as everywhere else */
+.reminder-day {
+  margin: var(--space-16) 0 var(--space-4);
+  color: var(--color-muted);
+}
+
+.reminder-day-due {
+  color: var(--color-terracotta);
+}
+
+.reminder-day-overdue {
+  color: var(--color-danger);
+}
+
+.reminder-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reminder-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding: var(--space-8) 0;
+  border-top: 1px solid var(--color-line);
+}
+
+.reminder-row:first-child {
+  border-top: 0;
+}
+
+.reminder-row-text {
+  display: grid;
+  min-width: 0;
+  font-size: var(--text-body-sm);
+}
+
+.reminder-row-text a {
+  color: var(--color-ink);
+  text-decoration: none;
+}
+
+.reminder-row-text a:hover {
+  text-decoration: underline;
+}
+
+.reminder-row-task {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--color-muted);
+  font-size: var(--text-small);
+}
+
+/* ── Add a reminder ─────────────────────────────────── */
+

@@ -1,0 +1,15 @@
+# Members' photos (CORE-17). Nothing in this folder may ever run as a program, whatever its name:
+# includes/upload.php only saves checked JPG/PNG files under random names, and this is the second lock.
+
+# PHP is switched off for this folder (php_module is the name XAMPP's Apache gives PHP 8)
+<IfModule php_module>
+    php_flag engine off
+</IfModule>
+
+# Only image files are served; any other file name is refused
+<FilesMatch "(?i)\.(php\d?|phtml|phar|pl|py|cgi|sh|asp|aspx|jsp|html?|svg|js)$">
+    Require all denied
+</FilesMatch>
+
+# No folder listings: photo addresses can't be browsed
+Options -Indexes

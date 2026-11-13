@@ -1,0 +1,4 @@
+# The website's own folder. Apache must never show a list of the files in a folder that has no index page
+# (public/api/, public/assets/…): a visitor could browse every script and image name. With this line such an
+# address answers 403 Forbidden instead. public/uploads/ has its own, stricter .htaccess.
+Options -Indexes

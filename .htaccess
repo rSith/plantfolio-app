@@ -1,0 +1,11 @@
+# Only public/ is the website (CLAUDE.md, folder structure). On XAMPP the whole repository sits inside htdocs, so
+# without this file anyone could download .git (the full source and history), database/seed.sql, docs and notes.
+# Paths here are relative to this folder, so it works whatever the project folder is called.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # The project folder itself opens the site
+    RewriteRule ^$ %{REQUEST_URI}public/ [R=302,L]
+    # Anything outside public/ does not exist for the browser
+    RewriteRule ^(?!public/) - [R=404,L]
+</IfModule>
+# XAMPP loads mod_rewrite by default. On a host without it, point the web root at public/ instead (DEP-02).

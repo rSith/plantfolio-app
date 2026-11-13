@@ -1,0 +1,620 @@
+<?php
+// Shared helper functions used by every page (MOD-01 foundation, week 1).
+
+/**
+ * Escape a value before printing it into HTML.
+ * Turns < > & and quotes into harmless codes, so text typed by a user can never run as HTML or JavaScript (XSS).
+ * Use it on everything that is printed — mock data included.
+ */
+function e($value)
+{
+    // The (string) cast lets numbers and null pass through without a PHP warning.
+    // ENT_SUBSTITUTE: bytes that are not valid UTF-8 become a "�" instead of blanking the whole value
+    // (without it, htmlspecialchars() returns an empty string, so one broken byte would hide a name or a heading).
+    return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+/**
+ * Read one setting from config/config.php, e.g. config('base_url').
+ * A static variable keeps its value between calls, so the file is only loaded the first time.
+ */
+function config($key)
+{
+    static $config = null;
+
+    if ($config === null) {
+        // config.php is git-ignored; a copy without it (a fresh clone) falls back to the committed template's defaults.
+        $file   = __DIR__ . '/../config/config.php';
+        $config = require (is_file($file) ? $file : __DIR__ . '/../config/config.example.php');
+
+        // Settings from the host's environment win over the file, for hosts that set them in a dashboard
+        if (getenv('BASE_URL')) {
+            $config['base_url'] = getenv('BASE_URL');
+        }
+        if (getenv('APP_ENV')) {
+            $config['app_env'] = getenv('APP_ENV');
+        }
+    }
+
+    return $config[$key] ?? null;
+}
+
+// XAMPP ships with another country's time zone (Europe/Berlin), which would make "due today"
+// wrong for several hours every evening. The fallback covers a config.php copied before this setting existed.
+date_default_timezone_set(config('timezone') ?? 'Asia/Colombo');
+
+// Errors: shown on screen only while developing. Anywhere else they go to the PHP error log, and a crash answers 500
+// instead of a page that shows file paths and code (security rules; DEP-02).
+if (config('app_env') !== 'development') {
+    ini_set('display_errors', '0');
+    ini_set('log_errors', '1');
+}
+
+// Security headers on every page and API answer, sent before any output:
+//   X-Frame-Options: no other site may show PlantFolio inside a frame, so it cannot trick a member into clicking a
+//                    button they cannot see (clickjacking)
+//   X-Content-Type-Options: the browser must trust the file type the server names, never guess it from the bytes
+//                    (an uploaded file can then only ever be an image)
+//   Referrer-Policy: other sites learn which site a visitor came from, never the full address (it can hold ?q= etc.)
+if (!headers_sent() && PHP_SAPI !== 'cli') {
+    header('X-Frame-Options: DENY');
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+}
+
+/**
+ * Build a full address from a path inside public/, e.g. url('assets/css/variables.css').
+ * Every link and file address goes through here, so moving the site means changing base_url only.
+ */
+function url($path = '')
+{
+    return rtrim(config('base_url'), '/') . '/' . ltrim($path, '/');
+}
+
+/**
+ * Address of one of our own files in public/ with its version added: asset_url('assets/css/listing.css') gives
+ * …/assets/css/listing.css?v=1792560000. The number is the time the file last changed (filemtime), so after a change
+ * the address is new and every browser loads the new file instead of an old copy it kept; while nothing changes,
+ * the address stays the same and the browser may keep using its copy. Only for paths written in our code.
+ */
+function asset_url($path)
+{
+    $file = __DIR__ . '/../public/' . ltrim($path, '/');
+
+    return url($path) . (is_file($file) ? '?v=' . filemtime($file) : '');
+}
+
+/**
+ * Address of a page with a query string, leaving out empty values:
+ * query_url('garden.php', ['collection' => 2, 'q' => '']) gives …/garden.php?collection=2.
+ * Filters keep their choices in the address, so a filtered page can be bookmarked, shared and reloaded.
+ * http_build_query() URL-encodes each value, so a search like "snake plant" becomes q=snake+plant.
+ */
+function query_url($page, array $params)
+{
+    // An empty list ([]) is dropped too: http_build_query() would print nothing for it and leave a bare "?"
+    $params = array_filter($params, fn ($value) => $value !== null && $value !== '' && $value !== []);
+
+    $address = url($page);
+
+    return $address . ($params ? (str_contains($address, '?') ? '&' : '?') . http_build_query($params) : '');
+}
+
+/**
+ * One piece of text from the address, e.g. get_text('q') for community.php?q=monstera, or '' when it is not given.
+ * Anyone can type anything there: a hand-made address can send a list where one word belongs (q[]=x makes $_GET['q']
+ * an array, and string functions then fail) or bytes that are not real UTF-8 text (q=%FF, which e() prints as an empty
+ * string). Both count as "not given", so the page falls back to its default as for any other wrong value.
+ * Pages still check the text against what is allowed (a whitelist, ctype_digit() …) after reading it.
+ */
+function get_text($name)
+{
+    $value = $_GET[$name] ?? null;
+
+    return (is_string($value) && mb_check_encoding($value, 'UTF-8')) ? $value : '';
+}
+
+/**
+ * The same as get_text(), for a field of a form sent with method="post": post_text('note').
+ * A hand-made request can send note[]=x just as easily as an address can.
+ */
+function post_text($name)
+{
+    $value = $_POST[$name] ?? null;
+
+    return (is_string($value) && mb_check_encoding($value, 'UTF-8')) ? $value : '';
+}
+
+/**
+ * The page to go back to after logging in, from login.php?next=…, or '' when it is not allowed.
+ * Only our own pages pass: a file name such as garden.php or listing.php?id=8 (from "Log in to show interest" on P11
+ * and from require_login()). Anything else — https://evil.example, //evil.example, /etc/passwd — is refused, so
+ * nobody can use our Log in page to send people on to another site after they log in (an "open redirect").
+ * \z means "the very end of the text": a plain $ would also accept a hidden line break at the end.
+ */
+function return_path($value)
+{
+    // One of our own pages, by file name only, with an optional plain query string. No "/", ":" or "\" can appear,
+    // so the address can never lead to another site. The account pages themselves are refused (no loop after login).
+    if (!is_string($value) || !preg_match('/^[a-z][a-z-]*\.php(\?[A-Za-z0-9=&._%+-]*)?\z/', $value)) {
+        return '';
+    }
+    return in_array(strtok($value, '?'), ['login.php', 'register.php', 'logout.php'], true) ? '' : $value;
+}
+
+/** The file name of the page the browser asked for, e.g. "garden.php". */
+function current_page()
+{
+    return basename($_SERVER['SCRIPT_NAME']);
+}
+
+/**
+ * The aria-current attribute of a navigation link, so a screen reader hears which link is lit, as the eye sees it.
+ * $is_lit is the same test that gives the link its .is-active class. A lit link that opens this very page gets
+ * aria-current="page" (Community on community.php); a lit link whose area the page only belongs to gets
+ * aria-current="true", "the current item of this set" (Exchange on listing.php, My Garden on a plant's profile).
+ * A link that is not lit gets nothing. Print the result without e(): it is fixed text.
+ */
+function nav_current($is_lit, $href)
+{
+    if (!$is_lit) {
+        return '';
+    }
+    // 'garden.php' and a full address like http://localhost/plantfolio/public/user.php?u=… both give the file name
+    $page = basename((string) parse_url($href, PHP_URL_PATH));
+
+    return $page === current_page() ? ' aria-current="page"' : ' aria-current="true"';
+}
+
+/**
+ * The area of the site the current page belongs to, from the sitemap on wireframe p4: 'garden', 'community' …
+ * The navigation highlights a whole area, so "My Garden" stays lit on a plant's profile and on the plant form.
+ * Returns '' for pages outside every area (landing, sign up, log in).
+ */
+function current_area()
+{
+    $areas = [
+        'dashboard' => ['dashboard.php'],
+        'garden'    => ['garden.php', 'plant.php', 'plant-form.php'],
+        'tools'     => ['identify.php', 'health-check.php'],
+        // Explore and Exchange became one page, Community; the listing pages and My exchanges belong to it
+        'community' => ['community.php', 'listing.php', 'listing-form.php', 'my-exchanges.php'],
+        'profile'   => ['user.php', 'settings.php'],
+    ];
+
+    foreach ($areas as $area => $pages) {
+        if (in_array(current_page(), $pages, true)) {
+            return $area;
+        }
+    }
+
+    return '';
+}
+
+/**
+ * Return a Lucide icon as inline SVG, e.g. icon('droplet'). Print it without e(): it is our own file, not user text.
+ * Inline SVG (instead of <img>) lets the icon take the colour of the text around it.
+ */
+function icon($name)
+{
+    $file = __DIR__ . '/../public/assets/img/icons/' . $name . '.svg';
+
+    // Letters, digits and hyphens only, so a name can never point at a file outside the icons folder.
+    if (!preg_match('/^[a-z0-9-]+$/', $name) || !is_file($file)) {
+        trigger_error('Icon not found: ' . $name, E_USER_WARNING);
+        return '';
+    }
+
+    $svg = file_get_contents($file);
+    $svg = preg_replace('/<!--.*?-->\s*/s', '', $svg);   // the licence comment stays in the file, not in every page
+
+    // Decorative by default: the text next to an icon carries the meaning for screen readers.
+    return preg_replace('/class="[^"]*"/', 'class="icon" aria-hidden="true"', $svg, 1);
+}
+
+/**
+ * Render a reusable piece from partials/ and hand it named variables:
+ * partial('plant-card', ['plant' => $plant]) runs partials/plant-card.php with $plant available inside it.
+ * Because it runs inside this function, the partial's own variables never leak into the page.
+ */
+function partial($partial_name, array $partial_data = [])
+{
+    extract($partial_data);   // turns ['plant' => …] into the variable $plant
+
+    include __DIR__ . '/../partials/' . $partial_name . '.php';
+}
+
+/**
+ * Address of a stored photo. The data holds only a path: "plants/3f9c….jpg" for an upload (includes/upload.php, saved
+ * in public/uploads/), or "mock/monty.svg" for the sample photos of the demo rows, which live in public/assets/img/.
+ */
+function photo_url($photo)
+{
+    if ($photo === null || $photo === '') {
+        return url('assets/img/no-photo.svg');   // a plant saved without a photo and without a known species
+    }
+    return url((str_starts_with((string) $photo, 'mock/') ? 'assets/img/' : 'uploads/') . $photo);
+}
+
+/**
+ * First letters of the first and last name, for avatars without a photo: "Nimali Perera" gives "NP".
+ * The mb_ functions count letters, not bytes, so Sinhala and Tamil names work too.
+ */
+function initials($full_name)
+{
+    $words = preg_split('/\s+/', trim($full_name));
+    $first = mb_substr($words[0], 0, 1);
+    $last  = count($words) > 1 ? mb_substr(end($words), 0, 1) : '';
+
+    return mb_strtoupper($first . $last);
+}
+
+/** The first name, for friendly sentences: "Ruwan Rathnayake" gives "Ruwan" ("Contact Ruwan to arrange the swap"). */
+function first_name($full_name)
+{
+    return preg_split('/\s+/', trim($full_name))[0];
+}
+
+/**
+ * Pick one of the four avatar colours (1–4) from the username.
+ * crc32() turns the text into a number, so the same member gets the same colour on every page.
+ */
+function avatar_tint($username)
+{
+    return crc32($username) % 4 + 1;
+}
+
+/**
+ * The word shown for a health_status value from the database, e.g. needs_attention gives "Needs attention".
+ * Kept in one place so every page uses exactly the same four words.
+ */
+function health_label($status)
+{
+    $labels = [
+        'thriving'        => 'Thriving',
+        'stable'          => 'Stable',
+        'needs_attention' => 'Needs attention',
+        'sick'            => 'Sick',
+    ];
+
+    return $labels[$status] ?? 'Unknown';
+}
+
+/**
+ * The care tasks a member can choose in Add a reminder (Dashboard), in the order of the list.
+ * recheck is not here: only a Health Check creates one (P08).
+ */
+function reminder_tasks()
+{
+    return ['water', 'fertilise', 'mist', 'rotate', 'prune', 'repot'];
+}
+
+/** The word for a care_reminders.task value: water gives "Water". */
+function task_label($task)
+{
+    $labels = [
+        'water'     => 'Water',
+        'fertilise' => 'Fertilise',
+        'mist'      => 'Mist',
+        'rotate'    => 'Rotate',
+        'prune'     => 'Prune',
+        'repot'     => 'Repot',
+        'recheck'   => 'Re-check',
+    ];
+
+    return $labels[$task] ?? ucfirst($task);
+}
+
+/** The icon for a care task, e.g. rain for watering, a flask of plant food for fertilising, scissors for pruning. */
+function task_icon($task)
+{
+    $icons = [
+        'water'     => 'cloud-rain',
+        'fertilise' => 'flask-conical',
+        'mist'      => 'spray-can',
+        'rotate'    => 'rotate-cw',
+        'prune'     => 'scissors',
+        'repot'     => 'shovel',
+        'recheck'   => 'stethoscope',
+    ];
+
+    return $icons[$task] ?? 'calendar';
+}
+
+/** A care task in the past tense, for the Mark done toast ("Watered Monty") and a Story care line. */
+function task_done_label($task)
+{
+    $labels = [
+        'water'     => 'Watered',
+        'fertilise' => 'Fertilised',
+        'mist'      => 'Misted',
+        'rotate'    => 'Rotated',
+        'prune'     => 'Pruned',
+        'repot'     => 'Repotted',
+        'recheck'   => 'Re-checked',
+    ];
+
+    return $labels[$task] ?? 'Done:';
+}
+
+/**
+ * How a reminder repeats, in words: "every 7 days", "every day", "on Mon, Wed, Fri" or "once".
+ * The mock rows have no repeat_type yet: they repeat every interval_days, like every reminder before Add a reminder.
+ */
+function repeat_words($reminder)
+{
+    $type = $reminder['repeat_type'] ?? 'interval';
+    if ($type === 'once') {
+        return 'once';
+    }
+    if ($type === 'days') {
+        return 'on ' . implode(', ', array_map('ucfirst', $reminder['repeat_days']));
+    }
+    $days = (int) $reminder['interval_days'];
+
+    return $days === 1 ? 'every day' : 'every ' . $days . ' days';
+}
+
+/** A reminder's schedule in one line: "every 7 days at 8:00 AM", or without the time when none was set. */
+function schedule_words($reminder)
+{
+    $time = $reminder['remind_time'] ?? null;
+
+    return repeat_words($reminder) . ($time ? ' at ' . date('g:i A', strtotime($time)) : '');
+}
+
+/**
+ * A task's icon and name in the task's own colour, e.g. blue Water, olive Fertilise (.task in components.css).
+ * Returns HTML like icon(), so print it with <?= task_name($task) ?>, not inside e().
+ */
+function task_name($task)
+{
+    return '<span class="task task-' . e($task) . '">' . icon(task_icon($task)) . ' ' . e(task_label($task)) . '</span>';
+}
+
+/**
+ * What a listing can be filed under, so swappers find it (Exchange filters, Create Listing; table accepted 11 Nov 2026
+ * listing_categories). Key => [words, icon]. A listing has one or more; the owner ticks them on the listing form.
+ */
+function listing_categories()
+{
+    return [
+        'indoor'        => ['label' => 'Indoor plants',      'icon' => 'house'],
+        'outdoor'       => ['label' => 'Outdoor plants',     'icon' => 'trees'],
+        'succulents'    => ['label' => 'Succulents & cacti', 'icon' => 'sprout'],
+        'air_purifying' => ['label' => 'Air purifying',      'icon' => 'wind'],
+        'flowering'     => ['label' => 'Flowering',          'icon' => 'flower-2'],
+        'edible'        => ['label' => 'Herbs & edibles',    'icon' => 'carrot'],
+        'pet_friendly'  => ['label' => 'Pet friendly',       'icon' => 'paw-print'],
+    ];
+}
+
+/** The light a plant needs: exchange_listings.light_level (NULL = the owner is not sure). */
+function light_levels()
+{
+    return ['low' => 'Low light', 'medium' => 'Medium light', 'bright' => 'Bright light'];
+}
+
+/** How much water a plant needs: exchange_listings.water_need (NULL = the owner is not sure). */
+function water_needs()
+{
+    return ['low' => 'Low', 'moderate' => 'Moderate', 'high' => 'High'];
+}
+
+/**
+ * Straight-line distance in whole km between two towns of $towns (rows with latitude and longitude, keyed by name),
+ * or null when either town is not in the list. The Haversine formula: the distance between two points on a sphere,
+ * here the Earth (radius 6371 km). Stage B does the same sum inside the SQL query, with the towns table.
+ */
+function town_distance_km(array $towns, $from, $to)
+{
+    if (!isset($towns[$from], $towns[$to])) {
+        return null;
+    }
+    $lat1 = deg2rad($towns[$from]['latitude']);
+    $lat2 = deg2rad($towns[$to]['latitude']);
+    $dlat = $lat2 - $lat1;
+    $dlon = deg2rad($towns[$to]['longitude'] - $towns[$from]['longitude']);
+
+    $a = sin($dlat / 2) ** 2 + cos($lat1) * cos($lat2) * sin($dlon / 2) ** 2;
+
+    return (int) round(6371 * 2 * atan2(sqrt($a), sqrt(1 - $a)));
+}
+
+/** The words and icon for an exchange_listings.type value (swap, free or either). */
+function listing_type($type)
+{
+    $types = [
+        'swap'   => ['label' => 'Swap', 'icon' => 'repeat'],
+        'free'   => ['label' => 'Free', 'icon' => 'gift'],
+        'either' => ['label' => 'Swap or free', 'icon' => 'repeat'],
+    ];
+
+    return $types[$type] ?? $types['swap'];
+}
+
+/**
+ * What a listing's owner wants in return, as the card and Listing Detail print it. "Looking for" is optional on the
+ * listing form, so an empty one gets the same words the form's live preview shows: a free plant asks for nothing,
+ * a swap with nothing named is open to offers.
+ */
+function listing_wants($listing)
+{
+    $wants = trim((string) ($listing['looking_for'] ?? ''));
+    if ($wants !== '') {
+        return $wants;
+    }
+    return $listing['type'] === 'free' ? 'nothing, free to a good home' : 'open to offers';
+}
+
+/** Whole days from today to a date: 0 is today, 3 is in three days, -2 is two days ago. */
+function days_until($date)
+{
+    $today  = new DateTime('today');
+    $target = new DateTime(substr($date, 0, 10));   // keep the date, drop any time of day
+
+    return (int) $today->diff($target)->format('%r%a');
+}
+
+/**
+ * Describe when a reminder is due, from its next_due date.
+ * Returns two things: 'state' (overdue, due or upcoming), which decides the colour — red for overdue,
+ * terracotta for due today — and 'text', the words to show ("Overdue 2 days", "Due today", "In 3 days").
+ */
+function care_due($next_due)
+{
+    $days = days_until($next_due);
+
+    if ($days < 0) {
+        $late = abs($days);
+        return ['state' => 'overdue', 'text' => 'Overdue ' . $late . ($late === 1 ? ' day' : ' days')];
+    }
+    if ($days === 0) {
+        return ['state' => 'due', 'text' => 'Due today'];
+    }
+    if ($days === 1) {
+        return ['state' => 'upcoming', 'text' => 'Tomorrow'];
+    }
+
+    return ['state' => 'upcoming', 'text' => 'In ' . $days . ' days'];
+}
+
+/**
+ * The next-care hint for a plant (wireframe p11, element 6), from its soonest reminder: next_due and task.
+ * The same as care_due(), except that a task due today names the job: "Water today", not "Due today".
+ * Returns null for a plant that has no reminder yet. Used by the plant card and My Garden's list view.
+ */
+function care_hint($plant)
+{
+    if (empty($plant['next_due'])) {
+        return null;
+    }
+
+    $due = care_due($plant['next_due']);
+    if ($due['state'] === 'due') {
+        $due['text'] = task_label($plant['task']) . ' today';
+    }
+
+    return $due;
+}
+
+/** How long ago something happened, in the wireframes' wording: "Today", "2 days ago", "1 week ago". */
+function time_ago($datetime)
+{
+    $days = -days_until($datetime);
+
+    if ($days <= 0) {
+        return 'Today';
+    }
+    if ($days === 1) {
+        return 'Yesterday';
+    }
+    if ($days < 7) {
+        return $days . ' days ago';
+    }
+    if ($days < 35) {
+        $weeks = intdiv($days, 7);
+        return $weeks . ($weeks === 1 ? ' week ago' : ' weeks ago');
+    }
+
+    $months = intdiv($days, 30);
+    return $months . ($months === 1 ? ' month ago' : ' months ago');
+}
+
+/** A short day for messages, e.g. "7 Oct". */
+function format_day($date)
+{
+    return date('j M', strtotime($date));
+}
+
+/** "1 plant" or "13 plants": the number and the right form of the word. */
+function count_words($count, $singular, $plural)
+{
+    return $count . ' ' . ($count === 1 ? $singular : $plural);
+}
+
+/**
+ * The fixed confidence word for an ML result. The limits are a design system rule and must not change:
+ * High from 80%, Medium from 60% to 79%, Not sure below 60%.
+ * $confidence is between 0 and 1, as the ML service returns it. The word is decided from the rounded
+ * percentage, so it always agrees with the number the user sees.
+ * Returns 'key' (used in CSS class names) and 'label' (the word shown).
+ */
+function confidence_level($confidence)
+{
+    $percent = round($confidence * 100);
+
+    if ($percent >= 80) {
+        return ['key' => 'high', 'label' => 'High'];
+    }
+    if ($percent >= 60) {
+        return ['key' => 'medium', 'label' => 'Medium'];
+    }
+
+    return ['key' => 'low', 'label' => 'Not sure'];
+}
+
+/**
+ * Whether a disease label came from the Pl@ntNet disease API: "PHYTIN___Phytophthora infestans - Late blight of potato",
+ * an EPPO code of 5–6 capitals or digits, then the name. Our own model's labels start with a crop ("Tomato___…").
+ */
+function is_plantnet_disease($label)
+{
+    return (bool) preg_match('/^[0-9A-Z]{5,6}___/', (string) $label);
+}
+
+/**
+ * The confidence word for a Health Check result. $predictions is the top 3, best first ('label', 'confidence').
+ * Our own model's results use the fixed words (confidence_level()). Pl@ntNet spreads its score over about 2,500
+ * diseases and pests, so even a right answer scores only 15–25% and would always be "Not sure" (tested 12 Nov 2026).
+ * For its results only (decision D28): "Possible match" when the top answer is at least 10% and at least twice the
+ * second one, otherwise "Not sure". Pl@ntNet results never get High or Medium.
+ */
+function disease_level($predictions)
+{
+    $top = $predictions[0];
+    if (!is_plantnet_disease($top['label'])) {
+        return confidence_level($top['confidence']);
+    }
+    $second = (float) ($predictions[1]['confidence'] ?? 0);
+    if (round($top['confidence'] * 100) >= 10 && $top['confidence'] >= 2 * $second) {
+        return ['key' => 'possible', 'label' => 'Possible match'];
+    }
+
+    return ['key' => 'low', 'label' => 'Not sure'];
+}
+
+/**
+ * Words for an ML result. A species result already holds a name. A disease result holds a class name:
+ * our model's "Tomato___Early_blight" becomes "Early blight" (the part after the plant name, underscores as spaces);
+ * Pl@ntNet's "PHYTIN___Phytophthora infestans - Late blight of potato" becomes "Late blight of potato" (the common name
+ * after " - "), or the scientific name when Pl@ntNet gives no common name ("STEMSP___Stemphylium sp.").
+ */
+function prediction_name($prediction)
+{
+    if ($prediction['type'] === 'species') {
+        return $prediction['common_name'] ?? $prediction['predicted_label'];
+    }
+
+    $parts = explode('___', $prediction['predicted_label'], 2);
+    if (is_plantnet_disease($prediction['predicted_label'])) {
+        $names = explode(' - ', $parts[1], 2);
+        return ucfirst(trim($names[1] ?? $names[0]));
+    }
+
+    return ucfirst(strtolower(str_replace('_', ' ', end($parts))));
+}
+
+/**
+ * The scientific name in a Pl@ntNet disease label ("Phytophthora infestans"), shown under the common name as the cause;
+ * null for our own model's labels and when the name is already the only name.
+ */
+function disease_scientific_name($label)
+{
+    if (!is_plantnet_disease($label)) {
+        return null;
+    }
+    $names = explode(' - ', explode('___', $label, 2)[1], 2);
+
+    return isset($names[1]) ? trim($names[0]) : null;
+}

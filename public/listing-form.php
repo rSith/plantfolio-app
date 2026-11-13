@@ -1,0 +1,653 @@
+<?php
+// Create Listing (P12, wireframe p19): turns a plant from the member's garden into an exchange listing in a few clicks,
+// with the privacy choices made up front (COM-06).
+// listing-form.php starts a new listing. ?plant=43 starts it from Goldie (the "List for exchange" links of My Garden and
+// the Plant Profile already open this address); ?plant=none lists something that is not in the garden, with its own photo.
+// listing-form.php?id=7 edits listing 7 with the same form, filled in, plus "Mark as exchanged" and "Close listing"
+// (p19, UX notes). Members only, and only the owner may edit.
+// Publish saves the exchange_listings row, its categories and its photo (CORE-17), then opens the listing at P11
+// (p19, element 7). Close listing (edit mode) closes it after a confirmation that names it.
+
+require_once __DIR__ . '/../includes/helpers.php';
+require_once __DIR__ . '/../includes/mock-data.php';
+require_once __DIR__ . '/../includes/upload.php';   // the listing's own photo, for something not in the garden
+
+// Members only: a visitor is sent to Log in and comes back here afterwards (includes/auth.php, CORE-10)
+require_login();
+
+// Both forms on this page (Publish, Close listing) carry a CSRF token
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+}
+
+// ── Add or edit ─────────────────────────────────────────
+// With ?id= the form edits that listing. Only its owner may, and only while it is open: anyone else, or a closed
+// listing, gets "not found", like the plant form. save_listing() checks ownership again when saving.
+// get_text() and ctype_digit() let only a plain number through, as on Listing Detail.
+
+$listing  = null;
+$id_param = get_text('id');
+if ($id_param !== '') {
+    if (ctype_digit($id_param)) {
+        foreach ($mock_listings as $row) {
+            if ($row['id'] === (int) $id_param && $row['user_id'] === $current_user['id'] && $row['status'] === 'open') {
+                $listing = $row;
+                break;
+            }
+        }
+    }
+    if (!$listing) {
+        http_response_code(404);
+        $page_title = 'Listing not found';
+        include __DIR__ . '/../includes/header.php';
+        ?>
+        <div class="container page">
+          <section class="panel">
+            <?php partial('empty-state', [
+                'heading' => 'h1',   // the whole page: its one main heading
+                'title'   => 'Listing not found',
+                'text'    => 'This listing does not exist, is not yours to edit, or is already closed.',
+                'actions' => [['label' => 'Go to My exchanges', 'href' => 'my-exchanges.php?tab=listings', 'icon' => 'repeat']],
+            ]); ?>
+          </section>
+        </div>
+        <?php
+        include __DIR__ . '/../includes/footer.php';
+        exit;
+    }
+}
+$is_edit = $listing !== null;
+
+// ── Close listing (edit mode, after the confirmation popup) ──
+// Closed without an exchange: it stays in the member's history, off the Exchange tab. close_listing() closes only the
+// member's own open listing.
+if ($is_edit && $_SERVER['REQUEST_METHOD'] === 'POST' && post_text('action') === 'close') {
+    close_listing($current_user['id'], $listing['id']);
+    header('Location: ' . url('my-exchanges.php?tab=listings'));
+    exit;
+}
+
+// ── Which plant (p19, element 1) ────────────────────────
+// $choice is the member's answer to "1. Which plant?": the id of one of their plants, 'none' for "Not in my garden",
+// or null while nothing is picked. The picker is a row of links (?plant=43), so it works without JavaScript and the
+// preview can show the chosen plant at once; the form carries the choice on in a hidden field when it is sent.
+// An id that is not one of the member's own plants counts as nothing picked: nobody can list someone else's plant.
+
+$my_plants   = array_column($mock_plants, null, 'id');
+$choice_text = $_SERVER['REQUEST_METHOD'] === 'POST' ? post_text('plant') : get_text('plant');
+
+$choice = null;
+if ($choice_text === 'none') {
+    $choice = 'none';
+} elseif (ctype_digit($choice_text) && isset($my_plants[(int) $choice_text])) {
+    $choice = (int) $choice_text;
+} elseif ($is_edit) {
+    // Editing without a ?plant= of its own: the plant the listing already comes from
+    $choice = isset($my_plants[$listing['plant_id']]) ? $listing['plant_id'] : 'none';
+}
+$plant = is_int($choice) ? $my_plants[$choice] : null;
+
+// Plants that are already on one of the member's open listings get a "Listed" note, so the same plant is not listed
+// twice by mistake (the listing being edited does not count)
+$listed_ids = [];
+foreach ($mock_listings as $row) {
+    if ($row['user_id'] === $current_user['id'] && $row['status'] === 'open' && $row['plant_id'] !== null
+        && (!$is_edit || $row['id'] !== $listing['id'])) {
+        $listed_ids[] = $row['plant_id'];
+    }
+}
+
+// Addresses that keep the add or edit mode: listing-form.php?id=7&plant=48
+$form_url = fn (array $params) => query_url('listing-form.php', array_merge($is_edit ? ['id' => $listing['id']] : [], $params));
+// #which-plant brings the browser back to the picker after a click, instead of the top of the page
+$pick_url = fn ($value) => $form_url(['plant' => $value]) . '#which-plant';
+
+// ── The values the form starts with ─────────────────────
+// Every field reads from $values, so the new form (defaults), the edit form (the listing's row) and a form sent back
+// with errors (what was typed) share one piece of HTML.
+
+$types       = ['swap' => 'Swap', 'free' => 'Free', 'either' => 'Either'];
+$has_phone   = !empty($current_user['phone']);   // a phone that was never given cannot be shared
+$title_limit = 100;
+$text_limit  = 500;   // p19: "142 / 500"
+
+$values = [
+    'title'           => '',
+    'type'            => 'swap',
+    'looking_for'     => '',
+    'description'     => '',
+    'species'         => '',
+    'size'            => '',
+    'plant_condition' => '',
+    'location'        => $current_user['location'],   // the member's town, the usual pick-up place
+    'km_from_town'    => $current_user['km_from_town'] ?? 0,   // how far the pick-up place is from it (0–30)
+    'share_email'     => 1,
+    'share_phone'     => 0,   // my choice: the phone number is shared only when the member ticks it
+    'categories'      => [],  // what the Exchange filters find it under (at least one)
+    'light_level'     => '',  // '' = Not sure
+    'water_need'      => '',
+];
+$title_suggested = false;
+
+if ($is_edit) {
+    $values = [
+        'title'           => $listing['title'],
+        'type'            => $listing['type'],
+        // Both are optional, so the row may hold NULL: the form works with '' (mb_strlen(null) is deprecated in PHP 8.1+)
+        'looking_for'     => $listing['looking_for'] ?? '',
+        'description'     => $listing['description'] ?? '',
+        'species'         => $listing['plant_id'] === null ? $listing['scientific_name'] : '',
+        'size'            => $listing['size'] ?? '',
+        'plant_condition' => $listing['plant_condition'] ?? '',
+        'location'        => $listing['location'],
+        'km_from_town'    => $listing['km_from_town'] ?? 0,
+        'share_email'     => $listing['share_email'],
+        'share_phone'     => $listing['share_phone'],
+        'categories'      => $listing['categories'],
+        'light_level'     => $listing['light_level'] ?? '',
+        'water_need'      => $listing['water_need'] ?? '',
+    ];
+} elseif ($plant) {
+    // "Title is suggested from the plant name and species, and can be changed" (p19, UX notes)
+    // A plant with no species yet has no common name: its nickname alone, not " from Spike"
+    $values['title'] = ($plant['common_name'] ?? '') !== '' ? $plant['common_name'] . ' from ' . $plant['nickname'] : $plant['nickname'];
+    $title_suggested = true;
+    // The species table already knows whether the plant is safe for pets: tick Pet friendly for the owner
+    if (!empty($mock_species[$plant['species_id']]['pet_safe'])) {
+        $values['categories'][] = 'pet_friendly';
+    }
+}
+
+// The town list of the town picker (partials/town-picker.php): every town in the towns table, A–Z
+$town_names = array_keys($mock_towns);
+sort($town_names);
+
+// The options of "3. Help people find it": the same lists as the Exchange filters (helpers.php)
+$category_options = listing_categories();
+$light_options    = light_levels();
+$water_options    = water_needs();
+
+// ── Publish (Post/Redirect/Get) ─────────────────────────
+// The browser checks the fields first (required, maxlength); these checks repeat them, because the browser's checks
+// can be switched off. Required (p19, UX notes): a plant or a photo, a title, a type and at least one contact method;
+// the town too, because every listing card shows it. An error is printed under its field, and what was typed stays.
+// Then the photo goes through save_upload() (finfo JPG/PNG, 5 MB), save_listing() saves the row and its categories in
+// one transaction, and the browser opens listing.php?id= of the listing.
+
+$errors = [];   // field name => message, printed under that field
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // \r\n becomes \n before counting, as on Listing Detail: the textarea counts a line break as one character
+    $values = [
+        'title'           => trim(post_text('title')),
+        'type'            => post_text('type'),
+        'looking_for'     => trim(post_text('looking_for')),
+        'description'     => trim(str_replace("\r\n", "\n", post_text('description'))),
+        'species'         => trim(post_text('species')),
+        'size'            => trim(post_text('size')),
+        'plant_condition' => trim(post_text('plant_condition')),
+        'location'        => trim(post_text('location')),
+        // A whole number from 0 to 30 (the slider); anything else counts as 0, "in the town"
+        'km_from_town'    => ctype_digit(post_text('km_from_town')) && (int) post_text('km_from_town') <= 30
+                             ? (int) post_text('km_from_town') : 0,
+        'share_email'     => post_text('share_email') === '1' ? 1 : 0,
+        'share_phone'     => $has_phone && post_text('share_phone') === '1' ? 1 : 0,
+        // Only known category keys are kept; a light or water value that is not on the list counts as "Not sure"
+        'categories'      => array_values(array_unique(array_filter((array) ($_POST['categories'] ?? []),
+                                 fn ($value) => is_string($value) && isset($category_options[$value])))),
+        'light_level'     => isset($light_options[post_text('light_level')]) ? post_text('light_level') : '',
+        'water_need'      => isset($water_options[post_text('water_need')]) ? post_text('water_need') : '',
+    ];
+
+    // A photo arrived when PHP reports no upload error for it. A hand-made photo[] makes 'error' a list: not a photo.
+    $photo_sent = ($_FILES['photo']['error'] ?? null) === UPLOAD_ERR_OK;
+    // A listing that already has its own photo (edited, not from the garden) does not need a new one
+    $has_own_photo = $is_edit && $listing['plant_id'] === null;
+
+    if ($choice === null) {
+        $errors['plant'] = 'Choose a plant from your garden, or "Not in my garden".';
+    } elseif ($choice === 'none' && !$photo_sent && !$has_own_photo) {
+        $errors['photo'] = 'Add a photo, so people can see what you offer.';
+    } elseif ($plant && ($plant['photo'] ?? '') === '') {
+        // A plant may be saved without a photo, but a listing cannot (exchange_listings.photo is NOT NULL, and every
+        // card shows one). Said here in words: before, this ended in a database error page.
+        $errors['plant'] = $plant['nickname'] . ' has no photo yet. Add one on its Edit page first, or choose "Not in my garden" and add a photo here.';
+    }
+    if ($values['title'] === '') {
+        $errors['title'] = 'Give your listing a title.';
+    } elseif (mb_strlen($values['title']) > $title_limit) {
+        $errors['title'] = 'Keep the title to ' . $title_limit . ' characters.';
+    }
+    if (!array_key_exists($values['type'], $types)) {
+        $errors['type'] = 'Choose Swap, Free or Either.';
+    }
+    if (mb_strlen($values['description']) > $text_limit) {
+        $errors['description'] = 'Keep the description to ' . $text_limit . ' characters.';
+    }
+    if (!$values['categories']) {
+        $errors['categories'] = 'Choose at least one category, so people can find your listing.';
+    }
+    if (!isset($mock_towns[$values['location']])) {
+        $errors['location'] = 'Choose the town nearest to where the plant can be picked up.';
+    }
+    if (!$values['share_email'] && !$values['share_phone']) {
+        $errors['share'] = 'Choose at least one way for interested people to contact you.';
+    }
+    // The column sizes of exchange_listings (data-dictionary.md): longer text would be refused by the database
+    foreach (['looking_for' => 150, 'size' => 60, 'plant_condition' => 100, 'species' => 150] as $field => $limit) {
+        if (mb_strlen($values[$field]) > $limit) {
+            $errors[$field] = 'Keep this to ' . $limit . ' characters.';
+        }
+    }
+
+    // The photo: a garden plant's own photo; or for something not in the garden a new upload, else the listing's
+    // current one (edit). Saved only once everything else is fine, so a failed save leaves no unused file.
+    $photo = null;
+    if (!$errors) {
+        if ($choice === 'none') {
+            $upload = save_upload('photo', 'listings');
+            if (isset($upload['error'])) {
+                $errors['photo'] = $upload['error'];
+            } else {
+                $photo = $upload['path'] ?? ($has_own_photo ? $listing['photo'] : null);
+            }
+        } else {
+            $photo = $plant['photo'];
+        }
+    }
+
+    if (!$errors) {
+        // The species: the plant's, or for something not in the garden the typed name when it is one of our species
+        // (scientific or common name). A name we do not know leaves species_id NULL (data dictionary).
+        $species_id = $plant['species_id'] ?? null;
+        if ($choice === 'none' && $values['species'] !== '') {
+            foreach ($mock_species as $row) {
+                if (strcasecmp($row['scientific_name'], $values['species']) === 0 || strcasecmp($row['common_name'], $values['species']) === 0) {
+                    $species_id = $row['id'];
+                }
+            }
+        }
+        $saved_id = save_listing($current_user['id'], $is_edit ? $listing['id'] : null, [
+            'plant_id'        => $plant['id'] ?? null,
+            'species_id'      => $species_id,
+            'title'           => $values['title'],
+            'description'     => $values['description'] === '' ? null : $values['description'],
+            'type'            => $values['type'],
+            'looking_for'     => $values['looking_for'] === '' ? null : $values['looking_for'],
+            'town_id'         => $mock_towns[$values['location']]['id'],
+            'km_from_town'    => $values['km_from_town'],
+            'size'            => $values['size'] === '' ? null : $values['size'],
+            'plant_condition' => $values['plant_condition'] === '' ? null : $values['plant_condition'],
+            'light_level'     => $values['light_level'] === '' ? null : $values['light_level'],
+            'water_need'      => $values['water_need'] === '' ? null : $values['water_need'],
+            'photo'           => $photo,
+            'share_email'     => $values['share_email'],
+            'share_phone'     => $values['share_phone'],
+        ], $values['categories']);
+        if ($saved_id !== false) {
+            if ($is_edit && $listing['photo'] !== $photo) {
+                forget_photo($listing['photo']);   // the old photo file, once nothing else uses it
+            }
+            header('Location: ' . url('listing.php?id=' . $saved_id));
+            exit;
+        }
+        $errors['title'] = 'This listing could not be saved: it is closed or not yours.';
+    }
+}
+
+// The aria-describedby and aria-invalid of a field: its hint, and its error when it has one
+$describe = function ($name, $hint_id = null) use ($errors) {
+    $ids = array_filter([$hint_id, isset($errors[$name]) ? $name . '-error' : null]);
+    return ($ids ? ' aria-describedby="' . e(implode(' ', $ids)) . '"' : '') . (isset($errors[$name]) ? ' aria-invalid="true"' : '');
+};
+
+// ── Live preview (p19, element 6) ───────────────────────
+// The card exactly as it will appear on the Exchange page (P10), drawn by the same partial. Here it shows the chosen
+// plant and what the form holds now; week 6 JavaScript updates it while the member types.
+// A plant from the garden lends its photo; an edited listing keeps its own; nothing chosen shows the neutral no-photo picture.
+
+if ($plant) {
+    $preview_photo = ($is_edit && $listing['plant_id'] === $plant['id']) ? $listing['photo'] : $plant['photo'];
+} elseif ($is_edit && $listing['plant_id'] === null) {
+    $preview_photo = $listing['photo'];
+} else {
+    $preview_photo = null;   // photo_url(null) draws the neutral no-photo picture; a bare file name pointed into uploads/ (a broken image)
+}
+$preview_type = array_key_exists($values['type'], $types) ? $values['type'] : 'swap';
+
+$preview = [
+    'id'             => $is_edit ? $listing['id'] : 0,
+    'type'           => $preview_type,
+    'title'          => $values['title'] !== '' ? $values['title'] : 'Your listing title',
+    'photo'          => $preview_photo,
+    'location'       => $values['location'] !== '' ? $values['location'] : $current_user['location'],
+    'distance_km'    => null,   // the owner needs no distance to their own town
+    'created_at'     => $is_edit ? $listing['created_at'] : date('Y-m-d H:i:s'),
+    // A free plant asks nothing in return: the same words as the free listings on the Exchange page. A swap whose
+    // owner names nothing in particular is open to offers.
+    'looking_for'    => $preview_type === 'free' ? 'nothing, free to a good home' : ($values['looking_for'] !== '' ? $values['looking_for'] : 'open to offers'),
+    'interest_count' => $is_edit ? $listing['interest_count'] : 0,
+    'username'       => $current_user['username'],
+    'full_name'      => $current_user['full_name'],
+    'avatar'         => $current_user['avatar'],
+    'rating_avg'     => $current_user['rating_avg'],
+    'rating_count'   => $current_user['rating_count'],
+];
+
+$back_url    = $is_edit ? url('listing.php?id=' . $listing['id']) : url('community.php?tab=exchange');
+$form_action = url('listing-form.php' . ($is_edit ? '?id=' . $listing['id'] : ''));
+
+$page_title = $is_edit ? 'Edit listing' : 'List a plant';
+$page_css   = 'listing-form.css';
+
+include __DIR__ . '/../includes/header.php';
+?>
+<div class="container page">
+  <a class="back-link" href="<?= e($back_url) ?>"><?= icon('arrow-left') ?> <?= $is_edit ? 'Back to the listing' : 'Back to the exchange' ?></a>
+  <h1 class="form-title"><?= $is_edit ? 'Edit listing' : 'List a plant for exchange' ?></h1>
+  <p class="form-intro">Share a plant or cuttings with the community. Your contact is only shown to people who are interested.</p>
+
+  <?php if ($errors): ?>
+    <?php // role="alert" makes a screen reader announce it as soon as the page opens ?>
+    <p class="alert alert-danger form-errors" role="alert"><?= icon('triangle-alert') ?> <span>Please check <?= e(count_words(count($errors), 'field', 'fields')) ?> below.</span></p>
+  <?php endif; ?>
+
+  <?php // multipart/form-data: the only form encoding that can carry a file. The whole two-column layout is inside the
+        // form, so Publish in the preview column sends every field. ?>
+  <form class="listing-form" method="post" action="<?= e($form_action) ?>" enctype="multipart/form-data">
+    <?= csrf_field() ?>
+    <?php // Text longer than its column: the browser's maxlength stops this, so only a hand-made request gets here ?>
+    <?php foreach (['species' => 'Species', 'looking_for' => 'Looking for', 'size' => 'Size', 'plant_condition' => 'Condition'] as $field => $label): ?>
+      <?php if (isset($errors[$field])): ?>
+        <p class="field-error" role="alert"><?= e($label . ': ' . $errors[$field]) ?></p>
+      <?php endif; ?>
+    <?php endforeach; ?>
+    <input type="hidden" name="plant" value="<?= e($choice ?? '') ?>">
+
+    <div class="listing-form-grid">
+      <div class="form-card listing-form-main">
+        <?php // 1. Which plant? (p19, element 1) ?>
+        <section id="which-plant" aria-labelledby="which-plant-title">
+          <h2 class="form-card-title listing-step" id="which-plant-title">1. Which plant?</h2>
+          <p class="field-hint listing-step-hint">Pick one from your garden to reuse its photos and species.</p>
+
+          <ul class="pick-list">
+            <?php foreach ($my_plants as $option): ?>
+              <?php $is_chosen = $choice === $option['id']; ?>
+              <li>
+                <a class="pick-tile" href="<?= e($pick_url($option['id'])) ?>"<?= $is_chosen ? ' aria-current="true"' : '' ?>>
+                  <span class="pick-photo">
+                    <img src="<?= e(photo_url($option['photo'])) ?>" alt="" loading="lazy">
+                    <?php if ($is_chosen): ?><span class="pick-check"><?= icon('check') ?></span><?php endif; ?>
+                  </span>
+                  <span class="pick-name"><?= e($option['nickname']) ?></span>
+                  <?php if (in_array($option['id'], $listed_ids, true)): ?>
+                    <span class="pick-note">Listed</span>
+                  <?php endif; ?>
+                </a>
+              </li>
+            <?php endforeach; ?>
+            <li>
+              <a class="pick-tile" href="<?= e($pick_url('none')) ?>"<?= $choice === 'none' ? ' aria-current="true"' : '' ?>>
+                <span class="pick-photo pick-photo-none">
+                  <?= icon('plus') ?>
+                  <?php if ($choice === 'none'): ?><span class="pick-check"><?= icon('check') ?></span><?php endif; ?>
+                </span>
+                <span class="pick-name">Not in my garden</span>
+              </a>
+            </li>
+          </ul>
+          <?php if (isset($errors['plant'])): ?>
+            <p class="field-error" id="plant-error" role="alert"><?= e($errors['plant']) ?></p>
+          <?php endif; ?>
+
+          <?php if ($plant): ?>
+            <p class="pick-summary">
+              <?= icon('leaf') ?>
+              <span>
+                Uses <?= e($plant['nickname']) ?>'s photo and species, <span class="scientific-name"><?= e($plant['scientific_name']) ?></span>.
+                <a href="<?= e(url('plant.php?id=' . $plant['id'])) ?>">See the story<span class="visually-hidden"> of <?= e($plant['nickname']) ?></span></a>
+              </span>
+            </p>
+          <?php elseif ($choice === 'none'): ?>
+            <?php // Something that is not in the garden (seedlings, cuttings): its own photo and species ?>
+            <div class="listing-own">
+              <div class="field">
+                <span class="field-label" id="photo-label">Photo</span>
+                <?php if ($is_edit && $listing['plant_id'] === null): ?>
+                  <div class="photo-current">
+                    <img src="<?= e(photo_url($listing['photo'])) ?>" alt="Current photo of <?= e($listing['title']) ?>" id="listing-photo-preview">
+                    <label class="btn btn-secondary btn-sm photo-change" for="listing-photo"><?= icon('camera') ?> Change photo</label>
+                  </div>
+                <?php else: ?>
+                  <label class="dropzone listing-dropzone" for="listing-photo">
+                    <?php // app.js shows the chosen photo here (data-photo-preview); components.css then hides the words ?>
+                    <img class="dropzone-preview" id="listing-photo-preview" alt="" hidden>
+                    <span class="dropzone-icon"><?= icon('image-up') ?></span>
+                    <span class="dropzone-title">Add a photo of what you offer</span>
+                    <span class="dropzone-text">Drag it here, browse, or use your phone camera</span>
+                    <span class="btn btn-secondary btn-sm"><?= icon('camera') ?> Choose photo</span>
+                  </label>
+                <?php endif; ?>
+                <input class="visually-hidden" type="file" id="listing-photo" name="photo" accept="image/jpeg,image/png"
+                       capture="environment" aria-labelledby="photo-label"<?= $describe('photo', 'photo-hint') ?>
+                       data-photo-input data-photo-hint="photo-hint" data-photo-preview="listing-photo-preview">
+                <p class="field-hint photo-hint" id="photo-hint"><?= icon('info') ?> JPG or PNG, up to 5 MB.</p>
+                <?php if (isset($errors['photo'])): ?>
+                  <span class="field-error" id="photo-error"><?= e($errors['photo']) ?></span>
+                <?php endif; ?>
+              </div>
+
+              <?php // The same list of known species as the plant form: typing suggests matches, any name is allowed ?>
+              <div class="field">
+                <label class="field-label" for="species">Species <span class="field-optional">(optional)</span></label>
+                <input class="input" type="text" id="species" name="species" value="<?= e($values['species']) ?>"
+                       list="species-list" placeholder="Start typing, e.g. Tomato" maxlength="120" autocomplete="off">
+                <datalist id="species-list">
+                  <?php foreach ($mock_species as $species): ?>
+                    <option value="<?= e($species['scientific_name']) ?>"><?= e($species['common_name']) ?></option>
+                  <?php endforeach; ?>
+                </datalist>
+              </div>
+            </div>
+          <?php endif; ?>
+        </section>
+
+        <?php // 2. Listing details (p19, elements 2 and 3) ?>
+        <section class="form-section" aria-labelledby="details-title">
+          <h2 class="form-card-title listing-step" id="details-title">2. Listing details</h2>
+
+          <div class="field">
+            <label class="field-label" for="title">Title</label>
+            <input class="input" type="text" id="title" name="title" value="<?= e($values['title']) ?>"
+                   placeholder="Pothos 'Golden', 3 rooted cuttings" maxlength="<?= e($title_limit) ?>" required<?= $describe('title', $title_suggested ? 'title-hint' : null) ?>>
+            <?php if ($title_suggested): ?>
+              <span class="field-hint" id="title-hint">Suggested from <?= e($plant['nickname']) ?>'s name and species. Change it as you like.</span>
+            <?php endif; ?>
+            <?php if (isset($errors['title'])): ?>
+              <span class="field-error" id="title-error"><?= e($errors['title']) ?></span>
+            <?php endif; ?>
+          </div>
+
+          <div class="field-row">
+            <?php // Exchange type (p19, element 2): three radio buttons drawn as one control ?>
+            <fieldset class="field form-fieldset"<?= isset($errors['type']) ? ' aria-describedby="type-error"' : '' ?>>
+              <legend class="field-label">Exchange type</legend>
+              <div class="segmented">
+                <?php foreach ($types as $key => $label): ?>
+                  <input type="radio" id="type-<?= e($key) ?>" name="type" value="<?= e($key) ?>"<?= $key === $values['type'] ? ' checked' : '' ?>>
+                  <label for="type-<?= e($key) ?>"><?php if ($key !== 'either'): ?><?= icon(listing_type($key)['icon']) ?><?php endif; ?> <?= e($label) ?></label>
+                <?php endforeach; ?>
+              </div>
+              <?php if (isset($errors['type'])): ?>
+                <span class="field-error" id="type-error"><?= e($errors['type']) ?></span>
+              <?php endif; ?>
+            </fieldset>
+
+            <?php // Looking for (p19, element 3): only for Swap and Either. listing-form.css hides it while Free is
+                  // chosen, with no JavaScript; stage B ignores it for a free listing. ?>
+            <div class="field looking-for-field">
+              <label class="field-label" for="looking-for">Looking for <span class="field-optional">(Swap and Either only)</span></label>
+              <input class="input" type="text" id="looking-for" name="looking_for" value="<?= e($values['looking_for']) ?>"
+                     placeholder="Succulents or a snake plant pup" maxlength="150">
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="description">Description <span class="field-optional">(optional)</span></label>
+            <textarea class="input" id="description" name="description" rows="4" maxlength="<?= e($text_limit) ?>"
+                      placeholder="How big is it, how healthy, is it rooted or potted?"<?= $describe('description', 'description-count') ?>><?= e($values['description']) ?></textarea>
+            <?php // Counted once here, as on Settings; week 6 JavaScript updates the count while typing ?>
+            <span class="field-hint listing-count" id="description-count"><?= e(mb_strlen($values['description'])) ?> / <?= e($text_limit) ?></span>
+            <?php if (isset($errors['description'])): ?>
+              <span class="field-error" id="description-error"><?= e($errors['description']) ?></span>
+            <?php endif; ?>
+          </div>
+
+          <?php // Size and condition fill the details list of Listing Detail (P11, p18). Not drawn on p19: my addition,
+                // so the proposed size and plant_condition columns have a place where the owner types them. ?>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label" for="size">Size <span class="field-optional">(optional)</span></label>
+              <input class="input" type="text" id="size" name="size" value="<?= e($values['size']) ?>"
+                     placeholder="3 cuttings, 15 to 20 cm" maxlength="60">
+            </div>
+            <div class="field">
+              <label class="field-label" for="plant-condition">Condition <span class="field-optional">(optional)</span></label>
+              <input class="input" type="text" id="plant-condition" name="plant_condition" value="<?= e($values['plant_condition']) ?>"
+                     placeholder="Healthy, rooted in water" maxlength="60">
+            </div>
+          </div>
+        </section>
+
+        <?php // 3. Help people find it (not on p19: Ranshitha's addition, 11 Nov). The same choices as the Exchange filters,
+              // so the owner files the listing where swappers look. Category is required; light and water may be "Not sure". ?>
+        <section class="form-section" aria-labelledby="find-title">
+          <h2 class="form-card-title listing-step" id="find-title">3. Help people find it</h2>
+          <p class="form-section-intro">People filter the exchange by these, so choose what fits your plant.</p>
+
+          <fieldset class="field form-fieldset" aria-describedby="categories-hint<?= isset($errors['categories']) ? ' categories-error' : '' ?>">
+            <legend class="field-label">Category</legend>
+            <span class="field-hint" id="categories-hint">Choose all that fit, at least one.</span>
+            <div class="category-choices">
+              <?php foreach ($category_options as $key => $option): ?>
+                <label class="chip-choice">
+                  <input type="checkbox" name="categories[]" value="<?= e($key) ?>"<?= in_array($key, $values['categories'], true) ? ' checked' : '' ?>>
+                  <span class="chip"><?= icon($option['icon']) ?> <?= e($option['label']) ?></span>
+                </label>
+              <?php endforeach; ?>
+            </div>
+            <?php if (isset($errors['categories'])): ?>
+              <span class="field-error" id="categories-error"><?= e($errors['categories']) ?></span>
+            <?php endif; ?>
+          </fieldset>
+
+          <?php // One choice each, so radio buttons; "Not sure" first and chosen by default: a beginner may not know ?>
+          <?php foreach ([['light_level', 'Light', 'sun', $light_options], ['water_need', 'Watering', 'droplet', $water_options]] as [$field, $legend, $field_icon, $options]): ?>
+            <fieldset class="field form-fieldset">
+              <legend class="field-label"><?= icon($field_icon) ?> <?= e($legend) ?> <span class="field-optional">(optional)</span></legend>
+              <div class="category-choices">
+                <?php foreach (array_merge(['' => 'Not sure'], $options) as $key => $label): ?>
+                  <label class="chip-choice">
+                    <input type="radio" name="<?= e($field) ?>" value="<?= e($key) ?>"<?= $key === $values[$field] ? ' checked' : '' ?>>
+                    <span class="chip"><?= e($label) ?></span>
+                  </label>
+                <?php endforeach; ?>
+              </div>
+            </fieldset>
+          <?php endforeach; ?>
+        </section>
+
+        <?php // 4. Location and contact (p19, elements 4 and 5) ?>
+        <section class="form-section" aria-labelledby="contact-title">
+          <h2 class="form-card-title listing-step" id="contact-title">4. Location and contact</h2>
+
+          <div class="field-row">
+            <?php // The pick-up place: the nearest town, then how far from it. The site never stores an address
+                  // (DES-07), so the hint is a promise, not a choice. Listing Detail shows "Pick-up: about 3 km from …". ?>
+            <?php partial('town-picker', [
+                'town_names' => $town_names,
+                'town'       => $values['location'],
+                'km'         => $values['km_from_town'],
+                'label'      => 'Pick-up: nearest town',
+                'km_label'   => 'How far from the town',
+                'required'   => true,
+                'hint'       => 'Shown on the listing as a town and a rough distance, never an address.',
+                'error'      => $errors['location'] ?? null,
+            ]); ?>
+
+            <?php // Contact sharing (p19, element 5): exactly which details an interested member will see ?>
+            <fieldset class="field form-fieldset" aria-describedby="share-hint<?= isset($errors['share']) ? ' share-error' : '' ?>">
+              <legend class="field-label">Share with interested people</legend>
+              <div class="share-options">
+                <label class="check">
+                  <input type="checkbox" name="share_email" value="1"<?= $values['share_email'] ? ' checked' : '' ?>>
+                  <span>Email <span class="share-value">· <?= e($current_user['email']) ?></span></span>
+                </label>
+                <?php if ($has_phone): ?>
+                  <label class="check">
+                    <input type="checkbox" name="share_phone" value="1"<?= $values['share_phone'] ? ' checked' : '' ?>>
+                    <span>Phone <span class="share-value">· <?= e($current_user['phone']) ?></span></span>
+                  </label>
+                <?php else: ?>
+                  <label class="check is-disabled">
+                    <input type="checkbox" name="share_phone" value="1" disabled>
+                    <span>Phone <span class="share-value">· <a href="<?= e(url('settings.php#profile')) ?>">add one in Settings</a></span></span>
+                  </label>
+                <?php endif; ?>
+              </div>
+              <span class="field-hint" id="share-hint">Shown only after someone says "I'm interested".</span>
+              <?php if (isset($errors['share'])): ?>
+                <span class="field-error" id="share-error"><?= e($errors['share']) ?></span>
+              <?php endif; ?>
+            </fieldset>
+          </div>
+        </section>
+      </div>
+
+      <?php // Preview and Publish (p19, elements 6 and 7). After the form on a phone; beside it on a desktop, where it
+            // stays in view while the form scrolls. ?>
+      <aside class="listing-form-side" aria-labelledby="preview-title">
+        <h2 class="label listing-preview-label" id="preview-title">Preview</h2>
+        <?php partial('listing-card', ['listing' => $preview, 'preview' => true]); ?>
+        <p class="listing-form-privacy"><?= icon('lock') ?> Contact details never appear on the card.</p>
+
+        <button class="btn btn-primary btn-lg listing-form-submit" type="submit"><?= $is_edit ? 'Save changes' : 'Publish listing' ?></button>
+        <a class="btn btn-ghost listing-form-cancel" href="<?= e($back_url) ?>">Cancel</a>
+
+        <?php if ($is_edit): ?>
+          <?php // Edit mode only (p19, UX notes). Mark as exchanged needs the person it went to, so it opens the
+                // interest table of My exchanges (P13). Close listing is destructive, so week 5 asks first (S6). ?>
+          <div class="listing-form-manage">
+            <a class="btn btn-secondary" href="<?= e(url('my-exchanges.php?tab=received&listing=' . $listing['id'])) ?>"><?= icon('check') ?> Mark as exchanged</a>
+            <?php // Opens the confirmation below, which names the listing (app.js, data-dialog) ?>
+            <button type="button" class="btn btn-ghost listing-form-close" data-dialog="close-listing" aria-haspopup="dialog"><?= icon('x') ?> Close listing</button>
+          </div>
+        <?php endif; ?>
+      </aside>
+    </div>
+  </form>
+
+  <?php if ($is_edit): ?>
+    <?php // Close listing confirmation (S6): destructive, so it names the listing; Cancel has the focus. A form of its
+          // own, outside the main form, because forms cannot be nested. ?>
+    <dialog class="modal" id="close-listing" aria-labelledby="close-listing-title">
+      <form class="modal-form" method="post" action="<?= e($form_action) ?>">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="close">
+        <div class="modal-head">
+          <h2 class="modal-title" id="close-listing-title">Close “<?= e($listing['title']) ?>”?</h2>
+          <button class="icon-btn" formmethod="dialog" formnovalidate aria-label="Close"><?= icon('x') ?></button>
+        </div>
+        <div class="modal-body">
+          <p>It leaves the Exchange and takes no more interest. It stays in your history in My exchanges.</p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-secondary" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+          <button class="btn btn-danger" type="submit"><?= icon('x') ?> Close listing</button>
+        </div>
+      </form>
+    </dialog>
+  <?php endif; ?>
+</div>
+<?php include __DIR__ . '/../includes/footer.php'; ?>

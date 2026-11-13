@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" role="img" aria-label="No photo yet">
+  <!-- Shown for a plant saved without a photo and without a known species (photo_url(), CORE-16). Sage and leaf from the design system. -->
+  <rect width="400" height="300" fill="#E4ECDC"/>
+  <g fill="none" stroke="#4A7043" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.55">
+    <path d="M200 215 V140"/>
+    <path d="M200 160 C170 160 150 140 148 108 C180 108 200 128 200 160 Z"/>
+    <path d="M200 145 C228 145 248 125 250 95 C220 95 200 115 200 145 Z"/>
+  </g>
+</svg>
