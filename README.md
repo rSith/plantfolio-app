@@ -82,7 +82,7 @@ Full steps, including free online hosting: **[`docs/SETUP.md`](docs/SETUP.md)**.
 1. Install [XAMPP](https://www.apachefriends.org) (PHP 8.1+) and put the project in the web folder:
    ```bash
    cd C:/xampp/htdocs
-   git clone https://github.com/rSith/<this-repository>.git plantfolio
+   git clone https://github.com/rSith/plantfolio-app.git plantfolio
    ```
 2. Start **Apache** and **MySQL**. In phpMyAdmin create a database called `plantfolio` (collation `utf8mb4_unicode_ci`) and import `database/schema.sql`, then `database/seed.sql`.
 3. Copy `config/config.example.php` to `config/config.php` (the defaults fit a standard XAMPP install).
